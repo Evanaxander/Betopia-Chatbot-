@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# VS Code settings
+.vscode/
+
+# Environment variables
+.env
+
+# FAISS/Vector DB files (optional)
+*.index
+*.faiss

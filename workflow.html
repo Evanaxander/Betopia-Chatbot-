@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Detailed RAG Pipeline Deep-Dive</title>
+    <style>
+        :root { --primary: #007B7F; --secondary: #00bfa5; --bg: #f0f4f8; --text: #2c3e50; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 40px; display: flex; flex-direction: column; align-items: center; }
+        
+        .section { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); width: 900px; margin-bottom: 30px; }
+        h2 { border-bottom: 2px solid var(--bg); padding-bottom: 10px; color: var(--primary); }
+        
+        .pipeline { display: flex; justify-content: space-between; align-items: center; margin: 40px 0; }
+        .box { padding: 15px; border-radius: 12px; border: 2px solid #ddd; background: #fafafa; width: 130px; text-align: center; transition: all 0.5s ease; position: relative; }
+        .arrow { font-size: 20px; color: #ccc; transition: color 0.5s; }
+        
+        /* Animation States */
+        .active { border-color: var(--secondary); background: #e0f7fa; transform: translateY(-10px); box-shadow: 0 5px 15px rgba(0,191,165,0.3); }
+        .completed { border-color: var(--primary); background: #b2dfdb; }
+        .active-arrow { color: var(--primary); font-weight: bold; }
+
+        .data-display { background: #273136; color: #a5d6a7; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 13px; height: 120px; overflow-y: auto; margin-top: 20px; }
+        .controls { display: flex; gap: 10px; margin-bottom: 20px; }
+        button { padding: 10px 20px; border: none; border-radius: 5px; background: var(--primary); color: white; cursor: pointer; font-weight: bold; }
+        button:hover { background: #005f61; }
+        button:disabled { background: #ccc; }
+    </style>
+</head>
+<body>
+
+    <div class="section">
+        <h2>Phase 1: Knowledge Ingestion (One-Time Setup)</h2>
+        <div class="controls">
+            <button id="btnIngest" onclick="runIngestion()">Start Ingestion Setup</button>
+        </div>
+        <div class="pipeline">
+            <div class="box" id="i1"><strong>1. PDF Load</strong><br><small>PyPDF2</small></div>
+            <div class="arrow" id="a1">→</div>
+            <div class="box" id="i2"><strong>2. Chunking</strong><br><small>Recursive Split</small></div>
+            <div class="arrow" id="a2">→</div>
+            <div class="box" id="i3"><strong>3. Embedding</strong><br><small>OpenAI API</small></div>
+            <div class="arrow" id="a3">→</div>
+            <div class="box" id="i4"><strong>4. FAISS Index</strong><br><small>Vector DB</small></div>
+        </div>
+        <div class="data-display" id="ingestData">// Ingestion data stream will appear here...</div>
+    </div>
+
+    <div class="section">
+        <h2>Phase 2: Chat Retrieval (Real-Time Query)</h2>
+        <div class="controls">
+            <button id="btnChat" onclick="runChat()" disabled>Simulate "Who is Betopia?"</button>
+        </div>
+        <div class="pipeline">
+            <div class="box" id="c1"><strong>1. Query</strong><br><small>User Input</small></div>
+            <div class="arrow" id="ca1">→</div>
+            <div class="box" id="c2"><strong>2. History</strong><br><small>Memory Check</small></div>
+            <div class="arrow" id="ca2">→</div>
+            <div class="box" id="c3"><strong>3. Retrieval</strong><br><small>FAISS Search</small></div>
+            <div class="arrow" id="ca3">→</div>
+            <div class="box" id="c4"><strong>4. LLM Gen</strong><br><small>GPT-4o-mini</small></div>
+        </div>
+        <div class="data-display" id="chatData">// Chat processing stream will appear here...</div>
+    </div>
+
+    <script>
+        const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+        async function runIngestion() {
+            const btn = document.getElementById('btnIngest');
+            const data = document.getElementById('ingestData');
+            btn.disabled = true;
+            data.innerHTML = "";
+
+            // STEP 1: PDF LOADING
+            document.getElementById('i1').classList.add('active');
+            data.innerHTML += "<span style='color:#fff'>[PROCESS] Opening 'data/betopia.pdf'...</span><br>";
+            await wait(1500);
+            data.innerHTML += "> Found 12 Pages. Extracting Raw Text...<br>";
+            data.innerHTML += "<span style='color:#888'>Raw Preview: 'Betopia Ltd is a tech firm founded in 2010... our mission is...'</span><br>";
+            await wait(2000);
+            document.getElementById('i1').classList.replace('active', 'completed');
+            document.getElementById('a1').classList.add('active-arrow');
+
+            // STEP 2: CHUNKING
+            document.getElementById('i2').classList.add('active');
+            data.innerHTML += "<br><span style='color:#fff'>[PROCESS] Applying Recursive Character Splitting...</span><br>";
+            await wait(1000);
+            data.innerHTML += "> Rule: 500 chars per block | 100 char overlap.<br>";
+            data.innerHTML += "> <span style='color:orange'>Chunk #1:</span> '...founded in 2010. Our mission is to...' [400 chars more]<br>";
+            data.innerHTML += "> <span style='color:orange'>Chunk #2:</span> '...mission is to provide AI solutions...' [Contains overlap from #1]<br>";
+            await wait(2500);
+            document.getElementById('i2').classList.replace('active', 'completed');
+            document.getElementById('a2').classList.add('active-arrow');
+
+            // STEP 3: EMBEDDING
+            document.getElementById('i3').classList.add('active');
+            data.innerHTML += "<br><span style='color:#fff'>[PROCESS] Calling OpenAI API (text-embedding-3-small)...</span><br>";
+            await wait(1500);
+            data.innerHTML += "> Sending Text -> Receiving Vectors...<br>";
+            data.innerHTML += "> <span style='color:#4fc3f7'>Vector Preview: [-0.014, 0.082, -0.003, 0.021, ...]</span> (1536 dimensions)<br>";
+            data.innerHTML += "> Semantic meaning has been converted into coordinates.<br>";
+            await wait(3000);
+            document.getElementById('i3').classList.replace('active', 'completed');
+            document.getElementById('a3').classList.add('active-arrow');
+
+            // STEP 4: FAISS INDEXING
+            document.getElementById('i4').classList.add('active');
+            data.innerHTML += "<br><span style='color:#fff'>[PROCESS] Building FAISS Index...</span><br>";
+            await wait(1500);
+            data.innerHTML += "> Creating IndexFlatL2 (Euclidean Distance Map)...<br>";
+            data.innerHTML += "> Maps vectors to IDs: [Vector_001 -> 'Founded in 2010...']<br>";
+            data.innerHTML += "> <span style='color:#66bb6a'>SUCCESS: 35 Vectors indexed and searchable.</span><br>";
+            await wait(2000);
+            document.getElementById('i4').classList.replace('active', 'completed');
+            
+            document.getElementById('btnChat').disabled = false;
+        }
+
+        async function runChat() {
+            const data = document.getElementById('chatData');
+            // Reset chat styles
+            ['c1','c2','c3','c4'].forEach(id => document.getElementById(id).className = 'box');
+            ['ca1','ca2','ca3'].forEach(id => document.getElementById(id).className = 'arrow');
+
+            // Step 1: User Input
+            document.getElementById('c1').classList.add('active');
+            data.innerHTML = "User: 'What are the services of Betopia?'";
+            await wait(1500);
+            document.getElementById('c1').classList.replace('active', 'completed');
+            document.getElementById('ca1').classList.add('active-arrow');
+
+            // Step 2: History
+            document.getElementById('c2').classList.add('active');
+            data.innerHTML += "<br>> Checking conversation_history list...<br>> History found: [User previously greeted Bot]";
+            await wait(2000);
+            document.getElementById('c2').classList.replace('active', 'completed');
+            document.getElementById('ca2').classList.add('active-arrow');
+
+            // Step 3: Retrieval
+            document.getElementById('c3').classList.add('active');
+            data.innerHTML += "<br>> Searching FAISS for top_k=3 nearest neighbors...<br>> Match found in Chunk #4, #12, and #2.";
+            await wait(3000);
+            document.getElementById('c3').classList.replace('active', 'completed');
+            document.getElementById('ca3').classList.add('active-arrow');
+
+            // Step 4: Generation
+            document.getElementById('c4').classList.add('active');
+            data.innerHTML += "<br>> Injecting context into System Prompt...<br>> Waiting for GPT-4o-mini response...";
+            await wait(2500);
+            data.innerHTML += "<br><br><span style='color:white'>Bot: Betopia offers digital transformation, cloud hosting, and AI consulting services as per the PDF.</span>";
+            document.getElementById('c4').classList.replace('active', 'completed');
+        }
+    </script>
+</body>
+</html>
