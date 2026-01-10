@@ -20,9 +20,8 @@ try:
     from voice.listener import record_and_transcribe
     from voice.speaker import speak_text, stop_audio, is_audio_playing
     from rag.chunker import chunk_text
-    from rag.embeddings import embed_texts
-    from rag.vector_store import create_faiss_index
-    from rag.retriever import retrieve_chunks
+    from rag.embeddings import sync_to_chroma
+    from rag.vector_store import collection, query_db 
 except ModuleNotFoundError as e:
     print(f"❌ IMPORT ERROR: {e}")
     sys.exit(1)
@@ -31,21 +30,31 @@ except ModuleNotFoundError as e:
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# --- 4. BACKEND & INTENT HELPERS ---
+# --- 4. BACKEND HELPERS ---
 
 def save_lead_to_backend(data):
-    leads_file = os.path.join(root_dir, "data", "leads.json")
+    """Saves lead data into a persistent JSON file."""
+    # Ensure directory exists
+    data_dir = os.path.join(root_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    
+    leads_file = os.path.join(data_dir, "leads.json")
     data['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
     leads = []
-    if not os.path.exists(os.path.dirname(leads_file)):
-        os.makedirs(os.path.dirname(leads_file))
     if os.path.exists(leads_file):
         try:
-            with open(leads_file, 'r', encoding='utf-8') as f: leads = json.load(f)
-        except: leads = []
+            with open(leads_file, 'r', encoding='utf-8') as f:
+                leads = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            leads = []
+
     leads.append(data)
-    with open(leads_file, 'w', encoding='utf-8') as f: json.dump(leads, f, indent=4)
-    print(f"\n📂 DATA SECURELY SAVED: {os.path.abspath(leads_file)}")
+    
+    with open(leads_file, 'w', encoding='utf-8') as f:
+        json.dump(leads, f, indent=4)
+    
+    print(f"\n✅ DATA SECURELY SAVED TO: {leads_file}")
 
 def check_intent(user_input, context_mission):
     """Uses LLM to classify if user is agreeing or interested."""
@@ -53,14 +62,15 @@ def check_intent(user_input, context_mission):
         res = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": f"You are an intent classifier. Task: {context_mission}. If the user is agreeing (e.g., 'yeah', 'I would love to', 'proceed', 'sure', 'yes', 'okay'), reply 'YES'. Otherwise reply 'NO'."},
+                {"role": "system", "content": f"You are an intent classifier. Task: {context_mission}. If the user is agreeing, reply 'YES'. Otherwise reply 'NO'."},
                 {"role": "user", "content": user_input}
-            ]
+            ],
+            max_tokens=2,
+            temperature=0
         )
         return "YES" in res.choices[0].message.content.upper()
     except:
-        agree_words = ["yes", "yeah", "yep", "sure", "ok", "love", "would", "correct"]
-        return any(word in user_input.lower() for word in agree_words)
+        return False
 
 # --- 5. UPLOAD & SYNC ---
 
@@ -69,30 +79,33 @@ def handle_manual_upload():
     file_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
     root.destroy()
     if file_path:
+        filename = os.path.basename(file_path)
         text = ""
         with pymupdf.open(file_path) as doc:
             for page in doc: text += page.get_text() + "\n"
-        return chunk_text(text)
-    return []
+        chunks = chunk_text(text)
+        sync_to_chroma(collection, chunks, filename)
+        return True
+    return False
 
 def sync_initial_knowledge():
-    all_content = []
     data_path = os.path.join(root_dir, "data")
     if os.path.exists(data_path):
         for filename in os.listdir(data_path):
             if filename.lower().endswith(".pdf"):
-                text = ""
-                with pymupdf.open(os.path.join(data_path, filename)) as doc:
-                    for page in doc: text += page.get_text() + "\n"
-                chunks = chunk_text(text)
-                all_content.extend([f"[Source: {filename}] {c}" for c in chunks])
-    return all_content
+                existing = collection.get(where={"source": filename})
+                if len(existing['ids']) == 0:
+                    print(f"🆕 New file: {filename}. Indexing...")
+                    text = ""
+                    with pymupdf.open(os.path.join(data_path, filename)) as doc:
+                        for page in doc: text += page.get_text() + "\n"
+                    chunks = chunk_text(text)
+                    sync_to_chroma(collection, chunks, filename)
 
 # --- 6. THE MAIN CHAT LOOP ---
 
 def start_chat_loop():
-    content = sync_initial_knowledge()
-    index = create_faiss_index(embed_texts(content)) if content else None
+    sync_initial_knowledge()
 
     print("\n" + "="*50)
     print("🤖 BETOPIA EXECUTIVE CONSULTANT ACTIVE")
@@ -106,13 +119,10 @@ def start_chat_loop():
     last_response_had_offer = False 
 
     while True:
-        bot_is_talking = is_audio_playing()
-        raw_input = input("You: ")
-        
-        if bot_is_talking:
+        if is_audio_playing():
             stop_audio()
-            if not raw_input.strip(): continue 
 
+        raw_input = input("You: ")
         user_input = raw_input.strip()
         is_voice_mode = False
 
@@ -126,105 +136,98 @@ def start_chat_loop():
         if user_input.lower() == "exit": break
 
         if user_input.lower() == "upload":
-            new_chunks = handle_manual_upload()
-            if new_chunks:
-                content.extend(new_chunks)
-                index = create_faiss_index(embed_texts(content))
-                print("✅ Knowledge Base Updated!")
+            if handle_manual_upload(): print("✅ Knowledge Base Updated!")
             continue
 
-        # --- STEP A: HANDLE ACTIVE BOOKING STATES ---
+        # --- STEP A: LEAD COLLECTION STATE MACHINE ---
         if booking_state:
-            # Topic switch detection
-            if any(q in user_input.lower() for q in ["what", "who", "tell me", "how", "why"]) and booking_state != "VERIFY":
-                print("Assistant: Switching back to your query.")
-                booking_state = None
-            else:
-                if booking_state == "NAME":
-                    temp_lead['name'] = user_input
-                    msg = "Assistant: Thank you. Could you please provide your **Contact Number**?"
-                elif booking_state == "PHONE":
-                    temp_lead['phone'] = user_input
-                    msg = "Assistant: Understood. And what is your **Professional Email Address**?"
-                elif booking_state == "EMAIL":
-                    temp_lead['email'] = user_input
-                    msg = "Assistant: Could you please provide the designation and functional role of the primary attendee you would love to have a discussion with?"
-                elif booking_state == "POSITION":
-                    temp_lead['position'] = user_input
-                    msg = "Assistant: What is the primary **Business Objective** for this meeting?"
-                elif booking_state == "REASON":
-                    temp_lead['reason'] = user_input
-                    msg = f"\n--- SUMMARY ---\nName: {temp_lead['name']}\nPhone: {temp_lead['phone']}\nEmail: {temp_lead['email']}\nPosition: {temp_lead['position']}\nReason: {temp_lead['reason']}\n----------------\nIs this correct?"
-                    booking_state = "VERIFY"
-                    print(msg); continue
-                elif booking_state == "VERIFY":
-                    if check_intent(user_input, "Verify lead info"):
-                        save_lead_to_backend(temp_lead)
-                        msg = "Assistant: Verified. Our delegation will contact you shortly."
-                    else:
-                        msg = "Assistant: Information discarded. How else can I help?"
-                    booking_state = None; temp_lead = {}
-                
-                # Progression logic
-                if booking_state == "NAME": booking_state = "PHONE"
-                elif booking_state == "PHONE": booking_state = "EMAIL"
-                elif booking_state == "EMAIL": booking_state = "POSITION"
-                elif booking_state == "POSITION": booking_state = "REASON"
-                
-                print(msg)
-                if is_voice_mode: threading.Thread(target=speak_text, args=(msg,), daemon=True).start()
-                continue
+            if not user_input: continue
 
-        # --- STEP B: HANDLE "YES" TO INITIAL OFFER ---
+            if booking_state == "NAME":
+                temp_lead['name'] = user_input
+                msg = f"Assistant: Thank you, {user_input}. Could you please provide your **Contact Number**?"
+                booking_state = "PHONE"
+            elif booking_state == "PHONE":
+                temp_lead['phone'] = user_input
+                msg = "Assistant: Understood. And what is your **Professional Email Address**?"
+                booking_state = "EMAIL"
+            elif booking_state == "EMAIL":
+                temp_lead['email'] = user_input
+                msg = "Assistant: What is your current **Designation or Job Title**?"
+                booking_state = "POSITION"
+            elif booking_state == "POSITION":
+                temp_lead['position'] = user_input
+                msg = "Assistant: What is the primary **Business Objective** for this meeting?"
+                booking_state = "REASON"
+            elif booking_state == "REASON":
+                temp_lead['reason'] = user_input
+                msg = (f"\n--- SUMMARY ---\nName: {temp_lead['name']}\nPhone: {temp_lead['phone']}\n"
+                       f"Email: {temp_lead['email']}\nPosition: {temp_lead['position']}\n"
+                       f"Reason: {temp_lead['reason']}\n----------------\nIs this information correct? (Yes/No)")
+                booking_state = "VERIFY"
+            elif booking_state == "VERIFY":
+                # EXPERT FIX: Use local check + AI check for reliability
+                is_confirmed = user_input.lower() in ["yes", "y", "correct", "yeah", "ok"] or \
+                               check_intent(user_input, "Verify lead info")
+                
+                if is_confirmed:
+                    save_lead_to_backend(temp_lead)
+                    msg = "Assistant: Excellent. I have saved your details. A representative will reach out shortly."
+                else:
+                    msg = "Assistant: Understood. I have discarded that information. How else can I help?"
+                booking_state = None; temp_lead = {}
+
+            print(msg)
+            if is_voice_mode: threading.Thread(target=speak_text, args=(msg,), daemon=True).start()
+            continue
+
+        # --- STEP B: HANDLE OFFER ACCEPTANCE ---
         if last_response_had_offer:
             if check_intent(user_input, "Accept consultation invitation"):
                 msg = "Assistant: Excellent. To initiate coordination, what is your **Full Name**?"
                 print(msg)
                 if is_voice_mode: threading.Thread(target=speak_text, args=(msg,), daemon=True).start()
-                booking_state = "NAME"
-                last_response_had_offer = False
+                booking_state = "NAME"; last_response_had_offer = False
                 continue
-            else:
-                last_response_had_offer = False # User ignored offer, process as RAG
+            last_response_had_offer = False
 
-        # --- STEP C: RAG PROCESSING ---
+        # --- STEP C: RAG PROCESSING WITH STREAMING ---
         try:
-            local_retrieved = retrieve_chunks(user_input, content, index, lambda q: embed_texts([q]), k=10)
+            local_retrieved = query_db(user_input, n_results=5)
             full_context = "--- DOCUMENT DATA ---\n" + "\n".join(local_retrieved)
-            history_str = "\n".join([f"You: {h[0]}\nBot: {h[1]}" for h in history])
+            history_str = "\n".join([f"U: {h[0]}\nB: {h[1]}" for h in history[-3:]])
             
-            system_msg = (
-                "You are an Executive Business Consultant. Use DOCUMENT DATA for facts. "
-                "Tone: Professional, corporate, and authoritative. Avoid fluff. "
-                "If info is missing, say: 'I do not have specific internal documentation on this matter.'"
-            )
-            
-            res = client.chat.completions.create(
+            response_stream = client.chat.completions.create(
                 model="gpt-4o-mini", 
                 messages=[
-                    {"role": "system", "content": system_msg},
+                    {"role": "system", "content": "You are an Executive Business Consultant. Use DOCUMENT DATA for facts."},
                     {"role": "user", "content": f"History:\n{history_str}\n\nContext:\n{full_context}\n\nQuestion: {user_input}"}
                 ],
-                temperature=0.1
+                temperature=0.1,
+                stream=True
             )
-            answer = res.choices[0].message.content
 
-            # Offer logic: Only if query is about products or services
-            biz_words = ["software", "product", "service", "system", "erp", "ai", "pos", "hrm", "betopia"]
-            if any(w in user_input.lower() for w in biz_words) or any(w in answer.lower() for w in biz_words):
-                if "do not have specific internal documentation" not in answer:
-                    invitation = (
-                        "\n\nBased on your interest in our solutions, I can facilitate a formal consultation "
-                        "between you and a specialized Betopia delegation. Would you like to proceed with scheduling?"
-                    )
-                    answer += invitation
-                    last_response_had_offer = True
+            print("\nAssistant: ", end="", flush=True)
+            full_answer = ""
+            for chunk in response_stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    print(content, end="", flush=True)
+                    full_answer += content
 
-            print(f"\nAssistant: {answer}")
-            if is_voice_mode: threading.Thread(target=speak_text, args=(answer,), daemon=True).start()
+            # Lead Trigger
+            biz_words = ["software", "product", "service", "betopia", "system"]
+            if any(w in user_input.lower() for w in biz_words):
+                invitation = "\n\nWould you like to schedule a formal consultation with a Betopia delegation?"
+                print(invitation)
+                full_answer += invitation
+                last_response_had_offer = True
+
+            if is_voice_mode: 
+                threading.Thread(target=speak_text, args=(full_answer,), daemon=True).start()
             
-            history.append((user_input, answer))
-            if len(history) > 5: history.pop(0)
+            history.append((user_input, full_answer))
+            print("\n")
 
         except Exception as e: 
             print(f"❌ Error: {e}")

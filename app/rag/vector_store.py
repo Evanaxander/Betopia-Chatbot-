@@ -1,26 +1,24 @@
-import faiss
-import numpy as np
-
-def create_faiss_index(vectors):
-    dim = len(vectors[0])
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(vectors).astype('float32'))
-    return index
-
+import os
 import chromadb
+from chromadb.utils import embedding_functions
 
-def get_chroma_collection():
-    client = chromadb.PersistentClient(path="./chroma_db")
-    return client.get_or_create_collection(name="betopia_knowledge")
+# Ensures the DB is created in the project root
+DB_PATH = os.path.join(os.path.dirname(__file__), "..", "chroma_db")
 
-def delete_file_from_db(collection, filename):
-    """
-    Removes all chunks associated with a specific file 
-    to make room for updated information.
-    """
+openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    model_name="text-embedding-3-small"
+)
+
+client = chromadb.PersistentClient(path=DB_PATH)
+collection = client.get_or_create_collection(
+    name="betopia_knowledge", 
+    embedding_function=openai_ef
+)
+
+def query_db(query_text, n_results=5):
     try:
-        # We target the 'source' metadata we saved earlier
-        collection.delete(where={"source": filename})
-        print(f"🗑️  Old entries for {filename} removed from database.")
-    except Exception as e:
-        print(f"ℹ️  No existing entries found for {filename} (New file).")
+        results = collection.query(query_texts=[query_text], n_results=n_results)
+        return results['documents'][0] if results['documents'] else []
+    except:
+        return []
