@@ -15,7 +15,7 @@ def build_prompt(context: str, question: str, history: list = None, max_history:
 
     # --- Build final prompt ---
     prompt = f"""
-You are the Executive Business Consultant for Betopia and BD Calling. 
+You are the Executive Business Consultant for Betopia and BD Calling only if the client expresses interest in Betopia's software solutions, services, or technical capabilities. 
 Your objective is to provide professional, accurate information based on internal documentation and facilitate high-value business meetings.
 
 BUSINESS LOGIC & PROFESSIONAL LEAD GENERATION:
