@@ -1,154 +1,198 @@
+import sys
 import os
+import shutil
+import tkinter as tk
+from tkinter import filedialog
 from dotenv import load_dotenv
 from openai import OpenAI
+import pymupdf
 
-# Custom RAG modules 
-from rag.pdf_loader import extract_text_from_pdf
-from rag.chunker import chunk_text
-from rag.embeddings import embed_texts, describe_image
-from rag.vector_store import create_faiss_index, get_chroma_collection, delete_file_from_db
-from rag.retriever import retrieve_chunks
-from rag.prompt import build_prompt
+# --- 1. BULLETPROOF PATH LOGIC ---
+current_script_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.abspath(os.path.join(current_script_dir, ".."))
 
-# 1. SETUP
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+# --- 2. CUSTOM MODULE IMPORTS ---
+try:
+    from voice.listener import record_and_transcribe
+    from voice.speaker import speak_text
+    from rag.chunker import chunk_text
+    from rag.embeddings import embed_texts, describe_image
+    from rag.vector_store import create_faiss_index, get_chroma_collection, delete_file_from_db
+    from rag.retriever import retrieve_chunks
+    from rag.prompt import build_prompt
+except ModuleNotFoundError as e:
+    print(f"❌ IMPORT ERROR: {e}")
+    print("👉 Ensure you have empty __init__.py files in /rag and /voice folders.")
+    sys.exit(1)
+
+# --- 3. INITIALIZATION ---
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-DATA_DIR = "data"
-IMAGE_FOLDER = "data/images"
 
-def sync_and_get_content():
-    """Syncs PDF and Image data with ChromaDB and returns consolidated text for FAISS."""
-    print("🔄 Syncing knowledge base with latest files...")
+LIB_DIR, IMG_DIR, UPLOAD_DIR = "data", "data/images", "uploads"
+for f in [LIB_DIR, IMG_DIR, UPLOAD_DIR]: 
+    os.makedirs(os.path.join(root_dir, f), exist_ok=True)
+
+# --- 4. CORE UTILITIES ---
+
+def extract_text_from_pdf(pdf_path):
+    text = ""
+    try:
+        with pymupdf.open(pdf_path) as doc:
+            for page in doc:
+                text += page.get_text() + "\n"
+    except Exception as e:
+        print(f"❌ Error reading PDF: {e}")
+    return text
+
+def sync_universal_knowledge():
+    print("🔄 Syncing Universal Brain...")
     collection = get_chroma_collection()
     all_content = []
+    targets = {
+        os.path.join(root_dir, LIB_DIR): "library", 
+        os.path.join(root_dir, IMG_DIR): "visual", 
+        os.path.join(root_dir, UPLOAD_DIR): "user_upload"
+    }
 
-    # --- Step A: Dynamic PDF Processing ---
-    if os.path.exists(DATA_DIR):
-        for filename in os.listdir(DATA_DIR):
+    for folder, category in targets.items():
+        if not os.path.exists(folder): continue
+        for filename in os.listdir(folder):
+            path = os.path.join(folder, filename)
+            if os.path.isdir(path): continue
+            
+            delete_file_from_db(collection, filename)
+            
             if filename.lower().endswith(".pdf"):
-                path = os.path.join(DATA_DIR, filename)
-                
-                # DYNAMIC UPDATE: Delete old version to prevent confusion
-                delete_file_from_db(collection, filename)
-                
-                print(f"📄 Indexing PDF: {filename}...")
                 text = extract_text_from_pdf(path)
-                chunks = chunk_text(text)
-                
-                # Labeling for LLM context
-                labeled_chunks = [f"[Source: {filename}] {c}" for c in chunks]
-                all_content.extend(labeled_chunks)
-                
-                # Persistent storage in ChromaDB
+                chunks = chunk_text(text) if text else []
+            elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                print(f"🖼️ Analyzing image: {filename}")
+                desc = describe_image(path)
+                chunks = [desc] if desc else []
+            else: continue
+
+            if chunks:
                 collection.add(
                     documents=chunks,
-                    metadatas=[{"source": filename} for _ in chunks],
-                    ids=[f"{filename}_{i}" for i in range(len(chunks))]
+                    metadatas=[{"source": filename, "type": category} for _ in chunks],
+                    ids=[f"{category}_{filename}_{i}" for i in range(len(chunks))]
                 )
-
-    # --- Step B: Sequential Image Processing ---
-    if os.path.exists(IMAGE_FOLDER):
-        for filename in os.listdir(IMAGE_FOLDER):
-            if filename.lower().endswith((".png", ".jpg", ".jpeg")):
-                path = os.path.join(IMAGE_FOLDER, filename)
-                
-                # DYNAMIC UPDATE: Delete old image description
-                delete_file_from_db(collection, filename)
-                
-                print(f"🖼️ Analyzing Image: {filename}...")
-                description = describe_image(path)
-                if description:
-                    image_text = f"[Source: Image {filename}] {description}"
-                    all_content.append(image_text)
-                    
-                    # Add image description to Chroma
-                    collection.add(
-                        documents=[description],
-                        metadatas=[{"source": filename}],
-                        ids=[f"img_{filename}"]
-                    )
-
+                all_content.extend([f"[Source: {filename}] {c}" for c in chunks])
     return all_content
 
-def generate_standalone_query(question, history):
-    """Rephrases follow-up questions using chat history to improve search results."""
-    # Use only last 3 turns for context to keep it snappy
-    history_context = "\n".join([f"User: {u}\nAI: {a}" for u, a in history[-3:]])
-    msg = (f"Given the following chat history:\n{history_context}\n\n"
-           f"Rephrase the follow-up question into a standalone search query. "
-           f"If it's already standalone, return it as is.\nQuestion: {question}")
-    
+def web_search_stream(query):
+    print(f"🌐 Searching the web for: {query}...")
     try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": msg}],
-            temperature=0
-        )
-        return res.choices[0].message.content.strip()
-    except Exception:
-        return question # Fallback to original question on error
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = [r['body'] for r in ddgs.text(query, max_results=3)]
+            return "\n".join([f"[Source: Internet] {r}" for r in results])
+    except Exception as e:
+        print(f"⚠️ Web search failed: {e}")
+        return ""
+
+def handle_file_explorer_upload():
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    file_path = filedialog.askopenfilename(title="Select file to upload", filetypes=[("PDF/Images", "*.pdf *.png *.jpg *.jpeg")])
+    root.destroy()
+
+    if file_path:
+        filename = os.path.basename(file_path)
+        shutil.copy(file_path, os.path.join(root_dir, UPLOAD_DIR, filename))
+        print(f"✅ Uploaded: {filename}")
+        return True
+    return False
+
+# --- 5. THE MAIN CHAT LOOP ---
 
 def start_chat_loop(all_content, index):
-    print("\n🤖 Knowledge Assistant Ready! (Type 'exit' to quit)\n")
-    history = [] 
+    print("\n" + "="*50)
+    print("🤖 BETOPIA ASSISTANT LIVE")
+    print("👉 Type your query (Text response only)")
+    print("👉 Press [ENTER] on empty line for VOICE (Voice response)")
+    print("👉 Commands: 'upload' to add files, 'exit' to quit.")
+    print("="*50 + "\n")
+    
+    history = []
     
     while True:
-        question = input("\nYou: ").strip()
-        if question.lower() == "exit": break
-        if not question: continue
-
-        # 1. Contextual Query Rephrasing
-        search_query = question
-        if len(history) > 0:
-            search_query = generate_standalone_query(question, history)
-            print(f"🔍 Searching for: {search_query}...")
-        else:
-            print("🔍 Searching across all documents...")
-
-        # 2. Retrieval
-        retrieved = retrieve_chunks(
-            search_query, 
-            all_content, 
-            index, 
-            embed_func=lambda q: embed_texts([q] if isinstance(q, str) else q)
-        )
-        context = "\n\n".join(retrieved)
-
-        # 3. Prompt Construction
-        prompt = build_prompt(context, question, history=history)
+        user_input = input("You: ")
+        cmd = user_input.strip().lower()
         
-        try:
-            res = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0
-            )
-            answer = res.choices[0].message.content
-            print(f"\nBot: {answer}")
+        if cmd == "exit": break
+        
+        should_speak = False # Default to silent
             
-            # 4. History Management (Stores last 7 turns)
+        # 🟢 MODE 1: VOICE INPUT
+        if user_input == "":
+            should_speak = True
+            print("🎤 [VOICE MODE]")
+            print("👉 Press [ENTER] to START recording...")
+            input() 
+            question = record_and_transcribe() # Wait for manual stop
+            if not question:
+                print("⚠️ No speech detected.")
+                continue
+            print(f"🗨️ You said: {question}")
+        
+        # 🔵 MODE 2: COMMANDS
+        elif cmd == "upload":
+            if handle_file_explorer_upload():
+                all_content = sync_universal_knowledge()
+                if all_content:
+                    index = create_faiss_index(embed_texts(all_content))
+            continue
+
+        elif cmd == "debug":
+            print(f"🧠 Brain Size: {len(all_content)} chunks.")
+            continue
+
+        # 🟡 MODE 3: TEXT INPUT
+        else:
+            question = user_input
+            should_speak = False
+
+        # --- AI PROCESSING ---
+        try:
+            search_query = question
+            if history:
+                res = client.chat.completions.create(
+                    model="gpt-4o-mini", 
+                    messages=[{"role": "user", "content": f"Query: {question}\nRewrite as search term:"}]
+                )
+                search_query = res.choices[0].message.content.strip()
+
+            local_retrieved = retrieve_chunks(search_query, all_content, index, lambda q: embed_texts([q]), k=5)
+            web_context = web_search_stream(search_query)
+
+            full_context = "--- DOCS ---\n" + "\n".join(local_retrieved) + f"\n\n--- WEB ---\n{web_context}"
+            prompt = build_prompt(full_context, question, history=history)
+            
+            res = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}])
+            answer = res.choices[0].message.content
+            
+            # --- OUTPUT ---
+            print(f"\n🤖 Bot: {answer}")
+            
+            if should_speak:
+                speak_text(answer) 
+            
             history.append((question, answer))
-            if len(history) > 7: 
-                history.pop(0)
-                
+            if len(history) > 5: history.pop(0)
+            
         except Exception as e:
-            print(f"❌ Chat Error: {e}")
-
-def run_system():
-    # 1. Sync files and clean up ChromaDB
-    all_content = sync_and_get_content()
-
-    if not all_content:
-        print("❌ No data found. Please add PDFs or Images.")
-        return
-
-    # 2. Create the Search Index (FAISS)
-    print(f"🧠 Indexing {len(all_content)} total chunks into memory...")
-    vectors = embed_texts(all_content)
-    index = create_faiss_index(vectors)
-    
-    # 3. Start Chat
-    start_chat_loop(all_content, index)
+            print(f"❌ Processing Error: {e}")
 
 if __name__ == "__main__":
-    run_system()
+    content = sync_universal_knowledge()
+    idx = None
+    if content:
+        idx = create_faiss_index(embed_texts(content))
+    
+    start_chat_loop(content, idx)

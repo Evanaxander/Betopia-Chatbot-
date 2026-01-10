@@ -1,20 +1,8 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual environment
+kokoro-v0_19.onnx
+voices.json
 venv/
-env/
-.venv/
-
-# VS Code settings
-.vscode/
-
-# Environment variables
+data/
+uploads/
+__pycache__/
+*.wav
 .env
-
-# FAISS/Vector DB files (optional)
-*.index
-*.faiss
