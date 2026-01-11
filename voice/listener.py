@@ -1,38 +1,35 @@
-import whisper
 import sounddevice as sd
 import numpy as np
 from scipy.io.wavfile import write
+from openai import OpenAI
 import os
-import torch
-import keyboard  # pip install keyboard
+from dotenv import load_dotenv
 
-_stt_model = None
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def record_and_transcribe(fs=16000):
-    global _stt_model
-    if _stt_model is None:
-        print("📥 Loading Whisper Turbo...")
-        _stt_model = whisper.load_model("turbo")
-
-    print("\n🔴 Recording... (Press ENTER to stop)")
+    print("\n🔴 [SYSTEM LISTENING] (Press ENTER to finish)")
     recording = []
     
     def callback(indata, frames, time, status):
         recording.append(indata.copy())
 
-    # Start an input stream
     with sd.InputStream(samplerate=fs, channels=1, callback=callback):
-        input() # Wait for user to press Enter
+        input() 
 
-    print("🛑 Recording stopped. Transcribing...")
+    print("🛑 [PROCESSING AUDIO]...")
     audio_data = np.concatenate(recording, axis=0)
-    
-    temp_file = "temp_in.wav"
+    temp_file = "temp_voice.wav"
     write(temp_file, fs, audio_data)
     
-    result = _stt_model.transcribe(temp_file, fp16=torch.cuda.is_available())
-    
-    if os.path.exists(temp_file):
-        os.remove(temp_file)
-        
-    return result["text"].strip()
+    try:
+        with open(temp_file, "rb") as audio:
+            # Using OpenAI API is 10x faster than local 'Turbo' model
+            transcript = client.audio.transcriptions.create(
+                model="whisper-1", 
+                file=audio
+            )
+        return transcript.text.strip()
+    finally:
+        if os.path.exists(temp_file): os.remove(temp_file)
