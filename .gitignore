@@ -1,8 +1,8 @@
-kokoro-v0_19.onnx
-voices.json
-venv/
+*.onnx
+*.bin
+*.json
+# (Except keep leads.json if you want, but usually data/ is ignored)
 data/
-uploads/
+chroma_db/
+venv/
 __pycache__/
-*.wav
-.env
