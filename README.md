@@ -63,3 +63,43 @@ Text Mode: Type directly into the prompt.
 Voice Mode: Press Enter on an empty prompt to start recording. Press Enter again to finish and send.
 
 Consultation Booking: If the AI offers a consultation, type "Yes" to trigger the data collection workflow.
+
+-----------------------------------------------------------------------------------------------------------------------------
+
+
+Launch Documentation: Betopia Assistant
+Follow these steps every time you restart your computer or open a new terminal to ensure the "Neural Interface" remains online.
+
+1. Open the Project Folder
+Open your terminal (Command Prompt or PowerShell) and navigate to the root folder of your project.
+
+DOS
+
+cd "C:\Users\abire\Documents\Evan\Betopia\betopia-rag-chatbot v5"
+2. Activate the Environment
+This is the most important step. You must "enter" the environment where the libraries (Whisper, OpenAI, etc.) are installed.
+
+Command Prompt (CMD):
+
+DOS
+
+.\venv\Scripts\activate
+PowerShell:
+
+PowerShell
+
+.\venv\Scripts\Activate.ps1
+Note: You will know it is working when you see (venv) appear in parentheses at the start of your command line.
+
+3. Navigate to the Source Code
+Because your files are nested, move into the folder that contains the app directory.
+
+DOS
+
+cd "betopia-rag-chatbot v5"
+4. Run the Chatbot
+Launch the entry point using the path we identified earlier.
+
+DOS
+
+python app/main.py
